@@ -1,0 +1,16 @@
+# Ralph Progress Log
+## Codebase Patterns
+- Place SQL schema changes in `db/migrations/*.sql`; numeric filename prefixes define execution order.
+- Use `scripts/migrate-tasks-db.js` as the shared migration runner; it stores applied files in `_migrations`.
+- Set `TASK_DB_PATH` during checks to run migrations against temporary database files.
+
+Started: Tue Apr 14 00:33:44 CST 2026
+---
+## [2026-04-14 00:42:34 CST] - US-001
+- Implemented task database migrations with `tasks.priority` (`high | medium | low`, default `medium`) plus a reusable migration runner.
+- Files changed: `package.json`, `db/migrations/0001_create_tasks_table.sql`, `db/migrations/0002_add_priority_to_tasks.sql`, `scripts/migrate-tasks-db.js`, `scripts/verify-priority-migration.js`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered: migration files are applied in lexicographic order and recorded in `_migrations`, so each migration file should stay immutable after merge.
+  - Gotchas encountered: this repository currently has no `AGENTS.md` file in edited paths, so reusable notes belong in `scripts/ralph/progress.txt`.
+  - Useful context: `scripts/verify-priority-migration.js` provides an end-to-end validation for schema, default value, value constraint, and migration idempotency.
+---
