@@ -1,0 +1,15 @@
+{
+  "name": "proxy-toggle",
+  "version": "1.0.0",
+  "description": "Toggle macOS proxy settings easily",
+  "type": "module",
+  "bin": {
+    "proxy-toggle": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": ["proxy", "whistle", "macos"],
+  "author": "",
+  "license": "MIT"
+}
