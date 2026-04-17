@@ -6,6 +6,8 @@ import path from 'path';
 
 const PROXY_HOST = '127.0.0.1';
 const PROXY_PORT = '8899';
+const W2_UI_HOST = '127.0.0.1';
+const W2_UI_PORT = 8899;
 const SAFE_EXEC_PATH = '/usr/sbin:/usr/bin:/bin:/sbin';
 const HELP_COMMANDS = new Set(['help', '--help', '-h']);
 const VALID_COMMANDS = new Set(['on', 'off', 'toggle', 'status', 'list', 'reset-bypass']);
@@ -26,6 +28,12 @@ const PENDING_STATE_FILE = path.join(
 
 const NETWORKSETUP_BIN = resolveBinary('networksetup', ['/usr/sbin/networksetup']);
 const ROUTE_BIN = resolveBinary('route', ['/sbin/route']);
+const W2_BIN = resolveOptionalBinary('w2', [
+  ...getPathBinaryCandidates('w2'),
+  path.join(os.homedir(), 'Library/pnpm/w2'),
+  '/opt/homebrew/bin/w2',
+  '/usr/local/bin/w2'
+]);
 
 function resolveBinary(binaryName, candidates) {
   for (const candidate of candidates) {
@@ -39,10 +47,37 @@ function resolveBinary(binaryName, candidates) {
   throw new Error(`Required binary "${binaryName}" is unavailable. Checked: ${candidates.join(', ')}`);
 }
 
-function runCommand(command, args) {
+function getPathBinaryCandidates(binaryName) {
+  const rawPath = process.env.PATH || '';
+  return rawPath
+    .split(path.delimiter)
+    .map(item => item.trim())
+    .filter(Boolean)
+    .map(item => path.join(item, binaryName));
+}
+
+function resolveOptionalBinary(binaryName, candidates) {
+  const checked = new Set();
+  for (const candidate of candidates) {
+    if (!candidate || checked.has(candidate)) {
+      continue;
+    }
+    checked.add(candidate);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+function runCommand(command, args, options = {}) {
+  const pathEnv = options.pathEnv || SAFE_EXEC_PATH;
   const result = spawnSync(command, args, {
     encoding: 'utf8',
-    env: { ...process.env, PATH: SAFE_EXEC_PATH }
+    env: { ...process.env, PATH: pathEnv }
   });
   if (result.error) {
     throw new Error(`Failed to run ${command}: ${result.error.message}`);
@@ -61,6 +96,129 @@ function runNetworksetup(args) {
     throw new Error(`networksetup ${args.join(' ')} failed: AuthorizationCreate() failed`);
   }
   return output;
+}
+
+function runW2(args, options = {}) {
+  const strict = options.strict !== false;
+  if (!W2_BIN) {
+    const message = 'w2 is unavailable. Install w2 or add it to PATH to sync w2 rules/network state';
+    if (strict) {
+      throw new Error(message);
+    }
+    console.warn(`⚠️ ${message}`);
+    return;
+  }
+  const w2Path = [
+    process.env.PATH || '',
+    path.dirname(W2_BIN),
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    SAFE_EXEC_PATH
+  ]
+    .filter(Boolean)
+    .join(path.delimiter);
+  try {
+    runCommand(W2_BIN, args, { pathEnv: w2Path });
+  } catch (error) {
+    const message = `w2 ${args.join(' ')} failed: ${error.message}`;
+    if (strict) {
+      throw new Error(message);
+    }
+    console.warn(`⚠️ ${message}`);
+  }
+}
+
+function postW2Cgi(pathname, formBody, options = {}) {
+  const strict = options.strict !== false;
+  const timeoutMs = options.timeoutMs || 5000;
+  const data = new URLSearchParams(formBody).toString();
+  const result = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      `
+const http = require('http');
+const payload = ${JSON.stringify(data)};
+const req = http.request({
+  host: ${JSON.stringify(W2_UI_HOST)},
+  port: ${JSON.stringify(W2_UI_PORT)},
+  path: ${JSON.stringify(pathname)},
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'Content-Length': Buffer.byteLength(payload)
+  }
+}, (res) => {
+  let raw = '';
+  res.on('data', (chunk) => { raw += chunk; });
+  res.on('end', () => {
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      console.error('HTTP ' + res.statusCode + ' ' + raw);
+      process.exit(2);
+      return;
+    }
+    process.stdout.write(raw);
+  });
+});
+req.on('error', (error) => {
+  console.error(error.message || String(error));
+  process.exit(3);
+});
+req.setTimeout(${JSON.stringify(timeoutMs)}, () => {
+  req.destroy(new Error('timeout'));
+});
+req.write(payload);
+req.end();
+`
+    ],
+    { encoding: 'utf8', env: { ...process.env, PATH: SAFE_EXEC_PATH } }
+  );
+
+  const combinedOutput = `${result.stdout || ''}${result.stderr || ''}`.trim();
+  if (result.status !== 0) {
+    const message = `w2 CGI ${pathname} failed${combinedOutput ? `: ${combinedOutput}` : ''}`;
+    if (strict) {
+      throw new Error(message);
+    }
+    console.warn(`⚠️ ${message}`);
+    return undefined;
+  }
+
+  if (!combinedOutput) {
+    return {};
+  }
+  try {
+    return JSON.parse(combinedOutput);
+  } catch {
+    return { raw: combinedOutput };
+  }
+}
+
+function setW2RulesEnabled(enabled, options = {}) {
+  const strict = options.strict !== false;
+  const disabledAllRules = enabled ? '0' : '1';
+  console.log(` Setting w2 rules ${enabled ? 'enabled' : 'disabled'}...`);
+  const response = postW2Cgi('/cgi-bin/rules/disable-all-rules', { disabledAllRules }, { strict });
+  if (response && typeof response === 'object' && response.ec !== undefined && response.ec !== 0) {
+    const message = `w2 rules toggle failed: ec=${response.ec}${response.em ? `, em=${response.em}` : ''}`;
+    if (strict) {
+      throw new Error(message);
+    }
+    console.warn(`⚠️ ${message}`);
+  }
+}
+
+function syncW2WithProxy(targetState) {
+  if (targetState === 'on') {
+    console.log(' Restarting w2 service in default mode...');
+    runW2(['stop'], { strict: false });
+    console.log(' Starting w2 service (rules + network enabled)...');
+    runW2(['start', '--no-prev-options', '-p', PROXY_PORT], { strict: true });
+    setW2RulesEnabled(true, { strict: true });
+    return;
+  }
+  console.log(' Stopping w2 service (rules + network)...');
+  runW2(['stop'], { strict: false });
 }
 
 function normalizeFieldKey(key) {
@@ -327,6 +485,7 @@ function runWithRollback(service, actionName, fn) {
 
 function enableProxy(service) {
   runWithRollback(service, 'Enable proxy', () => {
+    syncW2WithProxy('on');
     console.log(` Enabling HTTP proxy on ${service}...`);
     runNetworksetup(['-setwebproxy', service, PROXY_HOST, PROXY_PORT]);
     runNetworksetup(['-setwebproxystate', service, 'on']);
@@ -346,6 +505,7 @@ function disableProxy(service) {
     console.log(` Resetting proxy bypass domains on ${service}...`);
     setProxyBypassDomains(service, DEFAULT_BYPASS_DOMAINS);
   });
+  syncW2WithProxy('off');
   console.log(' Proxy disabled (HTTP + HTTPS); bypass domains restored to defaults');
 }
 
