@@ -151,62 +151,75 @@ function runW2(args) {
   return { ok: true };
 }
 
+// Enable whistle rules via its HTTP API (clears "All rules are currently disabled")
+function enableWhistleRules() {
+  try {
+    const http = require('http');
+    const data = 'disabledAllRules=0';
+    const req = http.request({
+      hostname: PROXY_HOST,
+      port: PROXY_PORT,
+      path: '/cgi-bin/rules/disable-all-rules',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(data) },
+      timeout: 5000,
+    }, (res) => {
+      if (res.statusCode === 200) console.log(' Whistle rules enabled');
+    });
+    req.on('error', () => {});
+    req.write(data);
+    req.end();
+  } catch {}
+}
+
 function ensureWhistleRunning() {
-  if (hasLocalProxyListener() === true) return; // already running
+  // Try starting if not already listening
+  if (hasLocalProxyListener() !== true) {
+    let r = runW2(['start', '-p', PROXY_PORT]);
+    if (!r.ok) {
+      // start failed, try restart in case daemon is in a dead state
+      r = runW2(['restart', '-p', PROXY_PORT]);
+    }
 
-  // Try starting first (whistle may already be installed, w2 may be on PATH)
-  let r = runW2(['start', '-p', PROXY_PORT]);
-  if (r.ok) {
-    console.log(` Whistle started on ${PROXY_HOST}:${PROXY_PORT}`);
-    runW2(['enable']);
-    return;
-  }
-
-  // start failed, try restart in case daemon is in a dead state
-  r = runW2(['restart', '-p', PROXY_PORT]);
-  if (r.ok) {
-    console.log(` Whistle restarted on ${PROXY_HOST}:${PROXY_PORT}`);
-    runW2(['enable']);
-    return;
-  }
-
-  // w2 not found? Try auto-install whistle, then start
-  if (!findW2Binary()) {
-    let installed = false;
-    // Try pnpm first, then npm (pnpm v10+ may block git-hosted deps like @aix/specx)
-    for (const pmName of ['pnpm', 'npm']) {
-      const pmPath = (() => {
-        try {
-          const r = spawnSync('which', [pmName], { encoding: 'utf8', timeout: 3000 });
-          if (r.status === 0 && r.stdout.trim()) return r.stdout.trim();
-        } catch {}
-        return null;
-      })();
-      if (!pmPath) continue;
-      const installResult = installWhistle(pmPath);
-      if (installResult.ok) {
-        installed = true;
-        break;
+    // w2 not found? Try auto-install whistle, then start
+    if (!r.ok && !findW2Binary()) {
+      let installed = false;
+      for (const pmName of ['pnpm', 'npm']) {
+        const pmPath = (() => {
+          try {
+            const r = spawnSync('which', [pmName], { encoding: 'utf8', timeout: 3000 });
+            if (r.status === 0 && r.stdout.trim()) return r.stdout.trim();
+          } catch {}
+          return null;
+        })();
+        if (!pmPath) continue;
+        const installResult = installWhistle(pmPath);
+        if (installResult.ok) {
+          installed = true;
+          break;
+        }
+        console.warn(` Warning: ${pmName} install failed (${installResult.reason}), trying next...`);
       }
-      console.warn(` Warning: ${pmName} install failed (${installResult.reason}), trying next...`);
+      if (!installed) {
+        console.warn(' Warning: failed to auto-install whistle.');
+        console.warn(` Install manually: "npm i -g whistle", then "w2 start -p ${PROXY_PORT}"`);
+        return;
+      }
+      r = runW2(['start', '-p', PROXY_PORT]);
     }
-    if (!installed) {
-      console.warn(' Warning: failed to auto-install whistle.');
-      console.warn(` Install manually: "npm i -g whistle", then "w2 start -p ${PROXY_PORT}"`);
-      return;
-    }
-    // Retry start after install
-    r = runW2(['start', '-p', PROXY_PORT]);
-    if (r.ok) {
+
+    if (r && r.ok) {
       console.log(` Whistle started on ${PROXY_HOST}:${PROXY_PORT}`);
-      runW2(['enable']);
+    } else if (r && !r.ok) {
+      console.warn(` Warning: unable to auto-start whistle (${r.reason}).`);
+      console.warn(` Start manually: "w2 start -p ${PROXY_PORT}"`);
       return;
     }
   }
 
-  // All attempts failed
-  console.warn(` Warning: unable to auto-start whistle (${r.reason}).`);
-  console.warn(` Start manually: "w2 start -p ${PROXY_PORT}"`);
+  // Enable auto-start on boot + enable rules
+  runW2(['enable']);
+  enableWhistleRules();
 }
 
 function stopWhistleIfRunning() {
