@@ -153,23 +153,27 @@ function runW2(args) {
 
 // Enable whistle rules via its HTTP API (clears "All rules are currently disabled")
 function enableWhistleRules() {
-  try {
-    const http = require('http');
-    const data = 'disabledAllRules=0';
-    const req = http.request({
-      hostname: PROXY_HOST,
-      port: PROXY_PORT,
-      path: '/cgi-bin/rules/disable-all-rules',
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(data) },
-      timeout: 5000,
-    }, (res) => {
-      if (res.statusCode === 200) console.log(' Whistle rules enabled');
-    });
-    req.on('error', () => {});
-    req.write(data);
-    req.end();
-  } catch {}
+  // Poll until whistle is ready (max 10s), then enable rules
+  const maxAttempts = 10;
+  for (let i = 0; i < maxAttempts; i++) {
+    if (i > 0) {
+      // Wait 1s between retries
+      const until = Date.now() + 1000;
+      while (Date.now() < until) { /* busy-wait */ }
+    }
+    try {
+      const result = spawnSync('curl', [
+        '-s', '-X', 'POST',
+        `http://${PROXY_HOST}:${PROXY_PORT}/cgi-bin/rules/disable-all-rules`,
+        '--data-urlencode', 'disabledAllRules=0',
+        '--connect-timeout', '3', '--max-time', '5',
+      ], { encoding: 'utf8', timeout: 8000 });
+      if (result.status === 0 && result.stdout.includes('"ec":0')) {
+        console.log(' Whistle rules enabled');
+        return;
+      }
+    } catch {}
+  }
 }
 
 function ensureWhistleRunning() {
