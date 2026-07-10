@@ -152,12 +152,21 @@ function runW2(args) {
 }
 
 function ensureWhistleRunning() {
-  if (hasLocalProxyListener() !== false) return; // already running or can't check
+  if (hasLocalProxyListener() === true) return; // already running
 
   // Try starting first (whistle may already be installed, w2 may be on PATH)
   let r = runW2(['start', '-p', PROXY_PORT]);
   if (r.ok) {
     console.log(` Whistle started on ${PROXY_HOST}:${PROXY_PORT}`);
+    runW2(['enable']);
+    return;
+  }
+
+  // start failed, try restart in case daemon is in a dead state
+  r = runW2(['restart', '-p', PROXY_PORT]);
+  if (r.ok) {
+    console.log(` Whistle restarted on ${PROXY_HOST}:${PROXY_PORT}`);
+    runW2(['enable']);
     return;
   }
 
@@ -190,6 +199,7 @@ function ensureWhistleRunning() {
     r = runW2(['start', '-p', PROXY_PORT]);
     if (r.ok) {
       console.log(` Whistle started on ${PROXY_HOST}:${PROXY_PORT}`);
+      runW2(['enable']);
       return;
     }
   }
