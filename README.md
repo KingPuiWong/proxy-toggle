@@ -36,20 +36,24 @@ proxy-toggle --help
 ## 快速开始
 
 ```bash
-# 1) 查看全部网络服务和当前代理状态
+# 1) 如果使用 Whistle，先安装并启动本地代理服务
+npm i -g whistle
+w2 start -p 8899
+
+# 2) 查看全部网络服务和当前代理状态
 proxy-toggle list
 
-# 2) 对活动网络服务开启代理
+# 3) 对活动网络服务开启代理
 proxy-toggle on
 
-# 3) 查看活动网络服务代理状态
+# 4) 查看活动网络服务代理状态
 proxy-toggle status
 
-# 4) 对指定网络服务执行操作（服务名含空格时使用引号）
+# 5) 对指定网络服务执行操作（服务名含空格时使用引号）
 proxy-toggle on "Wi-Fi"
 proxy-toggle status "Wi-Fi"
 
-# 5) 关闭代理并恢复默认 bypass 列表
+# 6) 关闭代理并恢复默认 bypass 列表
 proxy-toggle off
 ```
 
@@ -84,6 +88,8 @@ proxy-toggle --help
 
 - Host: `127.0.0.1`
 - Port: `8899`
+
+`proxy-toggle` 只修改 macOS 系统代理设置，不会安装或启动 `whistle` / `w2`。如果 `127.0.0.1:8899` 没有本地代理服务在监听，浏览器也无法打开 `http://127.0.0.1:8899/#rules`。
 
 ### 活动网络服务选择逻辑（省略 `service` 参数时）
 

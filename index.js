@@ -26,6 +26,65 @@ const PENDING_STATE_FILE = path.join(
 
 const NETWORKSETUP_BIN = resolveBinary('networksetup', ['/usr/sbin/networksetup']);
 const ROUTE_BIN = resolveBinary('route', ['/sbin/route']);
+const LSOF_BIN = '/usr/sbin/lsof';
+
+// W2 candidates: user-level npm global bin. Falls back gracefully if not found.
+const W2_PATHS = (() => {
+  const paths = [];
+  const npmPrefix = (() => {
+    try {
+      const r = spawnSync('npm', ['config', 'get', 'prefix'], { encoding: 'utf8', timeout: 3000 });
+      if (r.status === 0 && r.stdout) return r.stdout.trim();
+    } catch {}
+    return null;
+  })();
+  if (npmPrefix) paths.push(path.join(npmPrefix, 'bin', 'w2'));
+  paths.push('/usr/local/bin/w2', '/opt/homebrew/bin/w2');
+  return paths;
+})();
+
+
+function findPackageManager() {
+  // Prefer pnpm (faster), fall back to npm
+  for (const pm of ['pnpm', 'npm']) {
+    try {
+      const r = spawnSync('which', [pm], { encoding: 'utf8', timeout: 3000 });
+      if (r.status === 0 && r.stdout.trim()) return r.stdout.trim();
+    } catch {}
+  }
+  return null;
+}
+
+function installWhistle(pm) {
+  console.log(` Installing whistle (via ${path.basename(pm)})...`);
+  const result = spawnSync(pm, ['install', '-g', 'whistle'], {
+    encoding: 'utf8',
+    timeout: 120000,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  if (result.error) return { ok: false, reason: `Failed to run ${pm}: ${result.error.message}` };
+  if (result.status !== 0) {
+    const details = (result.stderr || result.stdout || '').trim();
+    return { ok: false, reason: `${path.basename(pm)} install failed${details ? `: ${details}` : ''}` };
+  }
+  console.log(' Whistle installed');
+  return { ok: true };
+}
+
+function findW2Binary() {
+  for (const candidate of W2_PATHS) {
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {}
+  }
+  // Last resort: try the user's full PATH
+  try {
+    const r = spawnSync('which', ['w2'], { encoding: 'utf8', timeout: 3000 });
+    if (r.status === 0 && r.stdout.trim()) return r.stdout.trim();
+  } catch {}
+  return null;
+}
 
 function resolveBinary(binaryName, candidates) {
   for (const candidate of candidates) {
@@ -61,6 +120,92 @@ function runNetworksetup(args) {
     throw new Error(`networksetup ${args.join(' ')} failed: AuthorizationCreate() failed`);
   }
   return output;
+}
+
+function hasLocalProxyListener() {
+  try {
+    accessSync(LSOF_BIN, constants.X_OK);
+  } catch {
+    return undefined;
+  }
+  const result = spawnSync(LSOF_BIN, ['-nP', `-iTCP:${PROXY_PORT}`, '-sTCP:LISTEN'], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: SAFE_EXEC_PATH }
+  });
+  if (result.error) {
+    return undefined;
+  }
+  return result.status === 0 && result.stdout.includes(`:${PROXY_PORT}`);
+}
+
+
+function runW2(args) {
+  const w2 = findW2Binary();
+  if (!w2) return { ok: false, reason: 'w2 binary not found. Install whistle: npm i -g whistle' };
+  const result = spawnSync(w2, args, { encoding: 'utf8', timeout: 15000 });
+  if (result.error) return { ok: false, reason: `Failed to run w2: ${result.error.message}` };
+  if (result.status !== 0) {
+    const details = (result.stderr || result.stdout || '').trim();
+    return { ok: false, reason: `w2 ${args.join(' ')} failed${details ? `: ${details}` : ''}` };
+  }
+  return { ok: true };
+}
+
+function ensureWhistleRunning() {
+  if (hasLocalProxyListener() !== false) return; // already running or can't check
+
+  // Try starting first (whistle may already be installed, w2 may be on PATH)
+  let r = runW2(['start', '-p', PROXY_PORT]);
+  if (r.ok) {
+    console.log(` Whistle started on ${PROXY_HOST}:${PROXY_PORT}`);
+    return;
+  }
+
+  // w2 not found? Try auto-install whistle, then start
+  if (!findW2Binary()) {
+    let installed = false;
+    // Try pnpm first, then npm (pnpm v10+ may block git-hosted deps like @aix/specx)
+    for (const pmName of ['pnpm', 'npm']) {
+      const pmPath = (() => {
+        try {
+          const r = spawnSync('which', [pmName], { encoding: 'utf8', timeout: 3000 });
+          if (r.status === 0 && r.stdout.trim()) return r.stdout.trim();
+        } catch {}
+        return null;
+      })();
+      if (!pmPath) continue;
+      const installResult = installWhistle(pmPath);
+      if (installResult.ok) {
+        installed = true;
+        break;
+      }
+      console.warn(` Warning: ${pmName} install failed (${installResult.reason}), trying next...`);
+    }
+    if (!installed) {
+      console.warn(' Warning: failed to auto-install whistle.');
+      console.warn(` Install manually: "npm i -g whistle", then "w2 start -p ${PROXY_PORT}"`);
+      return;
+    }
+    // Retry start after install
+    r = runW2(['start', '-p', PROXY_PORT]);
+    if (r.ok) {
+      console.log(` Whistle started on ${PROXY_HOST}:${PROXY_PORT}`);
+      return;
+    }
+  }
+
+  // All attempts failed
+  console.warn(` Warning: unable to auto-start whistle (${r.reason}).`);
+  console.warn(` Start manually: "w2 start -p ${PROXY_PORT}"`);
+}
+
+function stopWhistleIfRunning() {
+  const w2 = findW2Binary();
+  if (!w2) return;
+  const r = runW2(['stop']);
+  if (r.ok) {
+    console.log(' Whistle stopped');
+  }
 }
 
 function normalizeFieldKey(key) {
@@ -326,6 +471,7 @@ function runWithRollback(service, actionName, fn) {
 }
 
 function enableProxy(service) {
+  ensureWhistleRunning();
   runWithRollback(service, 'Enable proxy', () => {
     console.log(` Enabling HTTP proxy on ${service}...`);
     runNetworksetup(['-setwebproxy', service, PROXY_HOST, PROXY_PORT]);
@@ -334,7 +480,7 @@ function enableProxy(service) {
     runNetworksetup(['-setsecurewebproxy', service, PROXY_HOST, PROXY_PORT]);
     runNetworksetup(['-setsecurewebproxystate', service, 'on']);
   });
-  console.log(` Proxy enabled: ${PROXY_HOST}:${PROXY_PORT} (HTTP + HTTPS)`);
+  console.log(` Proxy enabled on ${service}: ${PROXY_HOST}:${PROXY_PORT} (HTTP + HTTPS)`);
 }
 
 function disableProxy(service) {
@@ -346,7 +492,8 @@ function disableProxy(service) {
     console.log(` Resetting proxy bypass domains on ${service}...`);
     setProxyBypassDomains(service, DEFAULT_BYPASS_DOMAINS);
   });
-  console.log(' Proxy disabled (HTTP + HTTPS); bypass domains restored to defaults');
+  console.log(` Proxy disabled on ${service} (HTTP + HTTPS); bypass domains restored to defaults`);
+  stopWhistleIfRunning();
 }
 
 function resetProxyBypass(service) {
@@ -367,14 +514,14 @@ function formatProxyValue(proxyInfo) {
   return 'enabled (server/port unavailable)';
 }
 
-function status(service) {
+function status(service, defaulted = false) {
   const http = getProxyInfo(service, 'http');
   const https = getProxyInfo(service, 'https');
   const bothEnabled = http.enabled && https.enabled;
   const anyEnabled = http.enabled || https.enabled;
   const state = bothEnabled ? 'enabled' : anyEnabled ? 'partially enabled' : 'disabled';
   const icon = bothEnabled ? '🟢' : anyEnabled ? '🟡' : '🔴';
-  console.log(`${icon} Proxy ${state} on ${service}`);
+  console.log(`${icon} Proxy ${state} on ${defaulted ? 'active service ' : ''}${service}`);
   console.log(`   HTTP:  ${formatProxyValue(http)}`);
   console.log(`   HTTPS: ${formatProxyValue(https)}`);
 }
@@ -469,7 +616,7 @@ function main() {
       disableProxy(service);
       break;
     case 'status':
-      status(service);
+      status(service, !serviceArg);
       break;
     case 'toggle': {
       const http = getProxyInfo(service, 'http');
